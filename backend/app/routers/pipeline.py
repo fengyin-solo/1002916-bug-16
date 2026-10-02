@@ -6,14 +6,14 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import ActionResult, EntryPayload, PageResult
-from app.services.pipeline import PipelineService
+from app.services.pipeline import STATUS_ORDER, pipeline_service
 
 router = APIRouter(prefix="/api/pipeline", tags=["压力管道"])
 
-service = PipelineService()
+service = pipeline_service
 
 LIST_FIELDS = ["管道编号", "管道级别", "设计压力", "输送介质", "管道长度", "敷设方式", "检验日期", "管道状态"]
-STATUSES = ["正常", "壁厚减薄", "待检验", "已报废"]
+STATUSES = STATUS_ORDER
 
 
 @router.get("", response_model=PageResult[dict])
@@ -26,8 +26,25 @@ def list_entries(
     """按管道编号与状态过滤压力管道列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
-    return PageResult(items=items, total=total, page=page, size=size)
+    if status and status not in STATUSES:
+        raise HTTPException(status_code=400, detail=f"管道状态只支持：{'、'.join(STATUSES)}")
+    items, total, actual_page = service.list_entries(
+        keyword=keyword, status=status, page=page, size=size
+    )
+    return PageResult(items=items, total=total, page=actual_page, size=size)
+
+
+@router.get("/stats")
+def status_stats() -> dict[str, int]:
+    """各档管道数量：列表页统计卡与状态筛选用同一份口径。"""
+    return service.status_counts()
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出压力管道清单：返回当前过滤条件下的全量数据。"""
+    items, total, _ = service.list_entries(page=1, size=10000)
+    return {"module": "pipeline", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -58,8 +75,14 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     return ActionResult(ok=True, message=message, entry=entry)
 
 
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出压力管道清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "pipeline", "total": total, "items": items}
+@router.post("/{entry_id}/conclusion", response_model=ActionResult)
+def record_conclusion(entry_id: int, payload: EntryPayload) -> ActionResult:
+    """检验完成后按结论（合格/壁厚减薄/报废）把待检验管道重新定格。"""
+    conclusion = str(payload.values.get("conclusion") or "").strip()
+    inspected_on = payload.values.get("inspected_on")
+    entry, message = service.record_conclusion(
+        entry_id, conclusion, inspected_on=str(inspected_on) if inspected_on is not None else None
+    )
+    if entry is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=entry)

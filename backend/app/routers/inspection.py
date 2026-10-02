@@ -6,28 +6,39 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import ActionResult, EntryPayload, PageResult
-from app.services.inspection import InspectionService
+from app.services.inspection import inspection_service
 
 router = APIRouter(prefix="/api/inspection", tags=["定期检验"])
 
-service = InspectionService()
+service = inspection_service
 
 LIST_FIELDS = ["检验编号", "被检设备", "检验类别", "检验机构", "计划检验日", "实际检验日", "检验结论", "检验状态"]
-STATUSES = ["待检验", "检验中", "合格", "不合格"]
+STATUSES = ["待检验", "检验中", "合格", "不合格", "已取消"]
 
 
 @router.get("", response_model=PageResult[dict])
 def list_entries(
     keyword: str | None = Query(default=None, description="按检验编号检索"),
-    status: str | None = Query(default=None, description="待检验、检验中、合格、不合格"),
+    status: str | None = Query(default=None, description="待检验、检验中、合格、不合格、已取消"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
     """按检验编号与状态过滤定期检验列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
-    return PageResult(items=items, total=total, page=page, size=size)
+    if status and status not in STATUSES:
+        raise HTTPException(status_code=400, detail=f"检验状态只支持：{'、'.join(STATUSES)}")
+    items, total, actual_page = service.list_entries(
+        keyword=keyword, status=status, page=page, size=size
+    )
+    return PageResult(items=items, total=total, page=actual_page, size=size)
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出定期检验清单：返回当前过滤条件下的全量数据。"""
+    items, total, _ = service.list_entries(page=1, size=10000)
+    return {"module": "inspection", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -50,16 +61,20 @@ def create_entry(payload: EntryPayload) -> ActionResult:
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条检验任务执行安排检验、录入结论、下达整改；不允许的动作会被拦下并说明原因。"""
+    """对单条检验任务执行安排检验、录入结论、下达整改；不允许的动作会被拦下并说明原因。
+
+    录入结论时从 values.conclusion 读取结论文本；关联压力管道的任务会联动把管道
+    按同一结论重新定格。
+    """
     action = str(payload.values.get("action") or "").strip()
-    entry, message = service.run_action(entry_id, action)
+    conclusion = payload.values.get("conclusion")
+    inspected_on = payload.values.get("inspected_on")
+    entry, message = service.run_action(
+        entry_id,
+        action,
+        conclusion=str(conclusion) if conclusion is not None else None,
+        inspected_on=str(inspected_on) if inspected_on is not None else None,
+    )
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出定期检验清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "inspection", "total": total, "items": items}
