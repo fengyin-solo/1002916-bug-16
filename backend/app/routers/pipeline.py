@@ -1,4 +1,4 @@
-"""压力管道接口：维护压力管道，覆盖记录减薄、安排检验、申请报废等动作。"""
+"""压力管道接口：维护压力管道，覆盖记录减薄、安排检验、申请报废、录入检验结论等动作。"""
 from __future__ import annotations
 
 from typing import Any
@@ -30,6 +30,13 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出压力管道清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "pipeline", "total": total, "items": items}
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条压力管道明细；不存在时给出可读的错误说明。"""
@@ -50,16 +57,11 @@ def create_entry(payload: EntryPayload) -> ActionResult:
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条压力管道执行记录减薄、安排检验、申请报废；不允许的动作会被拦下并说明原因。"""
-    action = str(payload.values.get("action") or "").strip()
-    entry, message = service.run_action(entry_id, action)
+    """对单条压力管道执行记录减薄、安排检验、申请报废、录入检验结论；不允许的动作会被拦下并说明原因。"""
+    values = payload.values
+    action = str(values.get("action") or "").strip()
+    conclusion = values.get("结论") or values.get("conclusion")
+    entry, message = service.run_action(entry_id, action, conclusion=str(conclusion) if conclusion else None)
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出压力管道清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "pipeline", "total": total, "items": items}
